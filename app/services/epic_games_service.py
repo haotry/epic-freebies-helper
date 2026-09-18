@@ -17,7 +17,7 @@ from loguru import logger
 from playwright.async_api import Frame, Page
 from playwright.async_api import expect, TimeoutError, FrameLocator
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-from tenacity import retry, retry_if_exception_type, stop_after_attempt
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 
 from models import OrderItem, Order
 from models import PromotionGame
@@ -900,7 +900,7 @@ class EpicGames:
         visible_locators = [
             page.get_by_text("One more step", exact=False),
             page.get_by_text("Please complete a security check to continue", exact=False),
-            page.locator("//iframe[contains(@src, 'hcaptcha') or contains(@title, 'hCaptcha')]"),
+            page.locator("//iframe[contains(@src, 'hcaptcha') or contains(@title, 'hCaptcha')]") ,
             page.frame_locator(PURCHASE_IFRAME_SELECTOR).first.locator(
                 "//iframe[contains(@src, 'hcaptcha') or contains(@title, 'hCaptcha')]"
             ),
@@ -1477,7 +1477,12 @@ class EpicGames:
             await self.page.reload()
             return await self._purchase_free_game()
 
-    @retry(retry=retry_if_exception_type(TimeoutError), stop=stop_after_attempt(2), reraise=True)
+    @retry(
+        retry=retry_if_exception_type((TimeoutError, RuntimeError)),
+        stop=stop_after_attempt(2),
+        wait=wait_fixed(5),
+        reraise=True,
+    )
     async def collect_weekly_games(self, promotions: List[PromotionGame]):
         has_cart_items, instant_claimed, failed_urls = await self.add_promotion_to_cart(
             self.page, promotions
@@ -1494,9 +1499,39 @@ class EpicGames:
                 logger.warning("Failed to collect cart games")
 
         if failed_urls:
-            raise RuntimeError(
-                "Failed to confirm claim flow for promotions: " + ", ".join(failed_urls)
-            )
+            verified_failed_urls = []
+            for failed_url in failed_urls:
+                promotion = next((p for p in promotions if p.url == failed_url), None)
+                if promotion is None:
+                    verified_failed_urls.append(failed_url)
+                    continue
+
+                with suppress(Exception):
+                    if await self._is_promotion_in_order_history(promotion):
+                        logger.success(
+                            "Resolved failed promotion via order history - title='{}' url='{}'",
+                            promotion.title,
+                            failed_url,
+                        )
+                        continue
+
+                with suppress(Exception):
+                    await self.page.goto(failed_url, wait_until="domcontentloaded", timeout=15000)
+                    if await self._is_claimed_state(self.page, failed_url):
+                        logger.success(
+                            "Resolved failed promotion via claimed-state validation - title='{}' url='{}'",
+                            promotion.title,
+                            failed_url,
+                        )
+                        continue
+
+                verified_failed_urls.append(failed_url)
+
+            if verified_failed_urls:
+                raise RuntimeError(
+                    "Failed to confirm claim flow for promotions: "
+                    + ", ".join(verified_failed_urls)
+                )
 
         if has_cart_items and not cart_claimed:
             raise RuntimeError("Failed to confirm cart checkout success")

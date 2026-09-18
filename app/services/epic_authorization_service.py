@@ -145,10 +145,12 @@ class EpicAuthorization:
         deadline = time.monotonic() + 45
         recovery_attempts = 0
         email_input = self.page.locator("#email")
+        continue_button = self.page.locator("#continue")
 
         while time.monotonic() < deadline:
             with suppress(Exception):
                 await expect(email_input).to_be_visible(timeout=1000)
+                await expect(continue_button).to_be_visible(timeout=1000)
                 return
 
             if await self._has_pre_login_security_check():
@@ -231,6 +233,35 @@ class EpicAuthorization:
             )
             return None
 
+    async def _click_sign_in(self) -> None:
+        await expect(self.page.locator("#password")).to_be_visible(timeout=15_000)
+
+        candidates = [
+            self.page.locator("#sign-in"),
+            self.page.locator('[data-testid="sign-in"]'),
+            self.page.get_by_role("button", name="Sign in", exact=True),
+            self.page.get_by_role("button", name="Log in", exact=True),
+            self.page.locator('button[type="submit"]'),
+        ]
+
+        for locator in candidates:
+            with suppress(Exception):
+                await expect(locator).to_be_visible(timeout=3_000)
+                await locator.click(timeout=5_000)
+                return
+
+        logger.error(
+            "Epic sign-in button was not found | url='{}' title='{}'",
+            self.page.url,
+            await self.page.title(),
+        )
+        logger.error("Epic login page body: {}", await self._page_body_text())
+
+        await self.page.screenshot(
+            path=SCREENSHOTS_DIR.joinpath(f"authorization/sign-in-missing-{int(time.time())}.png")
+        )
+        raise PlaywrightTimeoutError("Epic sign-in button was not found")
+
     async def _login(self) -> bool | None:
         # 尽可能早地初始化机器人
         agent = AgentV(page=self.page, agent_config=settings)
@@ -259,9 +290,14 @@ class EpicAuthorization:
             await expect(password_input).to_be_visible(timeout=10000)
             await password_input.fill(settings.EPIC_PASSWORD.get_secret_value())
 
-            # 4. 点击登录按钮，触发人机挑战值守监听器
-            # Active hCaptcha checkbox
-            await self.page.click("#sign-in")
+            if await self._has_pre_login_security_check() or await self._has_visible_hcaptcha():
+                logger.warning(
+                    "Epic security challenge detected before sign-in | url='{}'",
+                    self.page.url,
+                )
+
+            # 4. Click login button with fallback selectors to avoid Epic UI changes
+            await self._click_sign_in()
 
             login_confirmed = False
             for challenge_attempt in range(1, 4):

@@ -229,8 +229,13 @@ class EpicAuthorization:
             await self._click_sign_in()
             for challenge_attempt in range(1, 4):
                 logger.debug("Solving login challenge attempt {}/3", challenge_attempt)
-                with suppress(Exception):
-                    await asyncio.wait_for(agent.wait_for_challenge(), timeout=45)
+                try:
+                    await asyncio.wait_for(
+                        agent.wait_for_challenge(),
+                        timeout=settings.EXECUTION_TIMEOUT + settings.RESPONSE_TIMEOUT + 10,
+                    )
+                except Exception as err:
+                    logger.warning("Login challenge attempt failed: {!r}", err)
                 try:
                     await self._await_login_outcome(point_url, timeout_seconds=25)
                     break

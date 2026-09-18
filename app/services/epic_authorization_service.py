@@ -194,10 +194,21 @@ class EpicAuthorization:
             self.page.locator('form button'),
         ]
         for locator in candidates:
-            with suppress(Exception):
-                await expect(locator.first).to_be_visible(timeout=2500)
-                await locator.first.click(timeout=5000)
+            if await self._has_visible_hcaptcha():
+                logger.debug("Login challenge is visible; continuing to challenge handling")
                 return
+            button = locator.first
+            if not await button.is_visible():
+                continue
+            try:
+                await button.click(timeout=5000)
+                return
+            except PlaywrightTimeoutError:
+                # A click can open hCaptcha before Playwright finishes waiting.
+                if await self._has_visible_hcaptcha():
+                    logger.debug("Login click timed out after opening a challenge")
+                    return
+                raise
         raise PlaywrightTimeoutError("Epic sign-in control was not found")
 
     async def _login(self) -> bool | None:
@@ -236,8 +247,11 @@ class EpicAuthorization:
             logger.warning("Login attempt failed: {!r}", err)
             sr = SCREENSHOTS_DIR.joinpath("authorization")
             sr.mkdir(parents=True, exist_ok=True)
-            await self.page.screenshot(path=sr.joinpath(f"login-{int(time.time())}.png"))
-            if isinstance(err, EpicAuthenticationFatalError):
+            with suppress(Exception):
+                await self.page.screenshot(
+                    path=sr.joinpath(f"login-{int(time.time())}.png"), full_page=True
+                )
+            if isinstance(err, (EpicAuthenticationFatalError, EpicPreLoginSecurityError)):
                 raise
             return None
 

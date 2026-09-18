@@ -27,6 +27,10 @@ class EpicAuthenticationFatalError(RuntimeError):
     pass
 
 
+class EpicPreLoginSecurityError(RuntimeError):
+    """Epic returned a bot/security interstitial instead of the login form."""
+
+
 class EpicAuthorization:
     def __init__(self, page: Page):
         self.page = page
@@ -113,23 +117,24 @@ class EpicAuthorization:
         email_input = self.page.locator("#email")
         continue_button = self.page.locator("#continue")
         while time.monotonic() < deadline:
-            with suppress(Exception):
-                await expect(email_input).to_be_visible(timeout=1000)
-                await expect(continue_button).to_be_visible(timeout=1000)
-                return
             if await self._has_pre_login_security_check():
-                if recovery_attempts < 2:
+                if recovery_attempts < 1:
                     recovery_attempts += 1
                     logger.warning(
-                        "Pre-login security page detected, clearing cookies and retrying login entry ({}/2) | url='{}'",
-                        recovery_attempts, self.page.url,
+                        "Epic security interstitial detected; clearing cookies and retrying once | url='{}'",
+                        self.page.url,
                     )
                     await self.page.context.clear_cookies()
                     await self.page.goto(point_url, wait_until="domcontentloaded")
                     continue
-                logger.warning("Pre-login security page still active after recovery attempts | url='{}'", self.page.url)
-                await self.page.wait_for_timeout(2000)
-                continue
+                raise EpicPreLoginSecurityError(
+                    f"Epic security interstitial blocked the login form | url={self.page.url}"
+                )
+
+            with suppress(Exception):
+                await expect(email_input).to_be_visible(timeout=1000)
+                await expect(continue_button).to_be_visible(timeout=1000)
+                return
             await self.page.wait_for_timeout(500)
         raise PlaywrightTimeoutError("Timed out waiting for Epic login form")
 
@@ -144,7 +149,6 @@ class EpicAuthorization:
                 result = await self._login_error_signal.get()
                 error_code = result.get("errorCode", "unknown_error")
                 if error_code == "errors.com.epicgames.accountportal.csrf_token_invalid":
-                    logger.warning("Epic login returned csrf_token_invalid, refreshing login entry and retrying | url='{}'", self.page.url)
                     await self.page.context.clear_cookies()
                     await self.page.goto(point_url, wait_until="domcontentloaded")
                     await self._wait_for_login_form(point_url)
@@ -169,9 +173,12 @@ class EpicAuthorization:
         if self._needs_privacy_policy_correction():
             return None
         try:
-            return await self.page.locator("//egs-navigation").get_attribute("isloggedin")
+            return await self.page.locator("//egs-navigation").get_attribute("isloggedin", timeout=5000)
         except PlaywrightTimeoutError:
-            logger.warning("Timed out while waiting for //egs-navigation during auth check | current_url='{}'", self.page.url)
+            logger.warning(
+                "Timed out while waiting for //egs-navigation during auth check | current_url='{}'",
+                self.page.url,
+            )
             return None
 
     async def _click_sign_in(self) -> None:
@@ -191,19 +198,6 @@ class EpicAuthorization:
                 await expect(locator.first).to_be_visible(timeout=2500)
                 await locator.first.click(timeout=5000)
                 return
-
-        # Enter is only a fallback if it causes a real navigation or login signal.
-        await self.page.locator("#password").press("Enter")
-        with suppress(Exception):
-            await self.page.wait_for_timeout(1000)
-        if await self._get_login_status() == "true" or not self._login_error_signal.empty():
-            return
-
-        sr = SCREENSHOTS_DIR.joinpath("authorization")
-        sr.mkdir(parents=True, exist_ok=True)
-        logger.error("Epic sign-in control was not found | url='{}' title='{}'", self.page.url, await self.page.title())
-        logger.error("Epic login page body: {}", await self._page_body_text())
-        await self.page.screenshot(path=sr.joinpath(f"sign-in-missing-{int(time.time())}.png"))
         raise PlaywrightTimeoutError("Epic sign-in control was not found")
 
     async def _login(self) -> bool | None:
@@ -222,37 +216,35 @@ class EpicAuthorization:
             await expect(password_input).to_be_visible(timeout=10000)
             await password_input.fill(settings.EPIC_PASSWORD.get_secret_value())
             await self._click_sign_in()
-            login_confirmed = False
             for challenge_attempt in range(1, 4):
                 logger.debug("Solving login challenge attempt {}/3", challenge_attempt)
                 with suppress(Exception):
                     await asyncio.wait_for(agent.wait_for_challenge(), timeout=45)
                 try:
                     await self._await_login_outcome(point_url, timeout_seconds=25)
-                    login_confirmed = True
                     break
                 except PlaywrightTimeoutError:
                     if not await self._has_visible_hcaptcha():
                         raise
                     logger.warning("Login outcome timed out while captcha is still visible; retrying solve attempt {}/3", challenge_attempt)
-            if not login_confirmed:
+            else:
                 await self._await_login_outcome(point_url, timeout_seconds=10)
-            logger.success("Login success")
             await asyncio.wait_for(self._handle_right_account_validation(), timeout=60)
-            logger.success("Right account validation success")
+            logger.success("Login success")
             return True
         except Exception as err:
-            logger.warning(f"Login attempt failed: {err!r}")
+            logger.warning("Login attempt failed: {!r}", err)
             sr = SCREENSHOTS_DIR.joinpath("authorization")
             sr.mkdir(parents=True, exist_ok=True)
             await self.page.screenshot(path=sr.joinpath(f"login-{int(time.time())}.png"))
             if isinstance(err, EpicAuthenticationFatalError):
-                logger.error("Epic account requires two-factor authentication, which is not supported by this project. Disable Epic 2FA (email / SMS / authenticator) and rerun the workflow.")
                 raise
             return None
 
     async def invoke(self) -> bool:
         self.page.on("response", self._on_response_anything)
+        # A security interstitial is an environment/IP failure, not a transient login failure.
+        # Do not keep submitting credentials against the same blocked runner.
         for attempt in range(1, 4):
             await self.page.goto(URL_CLAIM, wait_until="domcontentloaded")
             if self._needs_privacy_policy_correction():
@@ -264,6 +256,9 @@ class EpicAuthorization:
             try:
                 if await self._login():
                     return True
+            except EpicPreLoginSecurityError as err:
+                logger.error("Epic login blocked by runner security challenge; stopping retries: {}", err)
+                return False
             except EpicAuthenticationFatalError:
                 logger.error("Authentication aborted because Epic 2FA is still enabled")
                 return False

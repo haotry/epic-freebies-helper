@@ -192,10 +192,11 @@ class EpicAuthorization:
                 await locator.first.click(timeout=5000)
                 return
 
-        # Epic sometimes renders the submit control without a stable id or role.
-        # Submitting the password form is equivalent and survives those UI changes.
+        # Enter is only a fallback if it causes a real navigation or login signal.
+        await self.page.locator("#password").press("Enter")
         with suppress(Exception):
-            await self.page.locator("#password").press("Enter")
+            await self.page.wait_for_timeout(1000)
+        if await self._get_login_status() == "true" or not self._login_error_signal.empty():
             return
 
         sr = SCREENSHOTS_DIR.joinpath("authorization")
@@ -225,7 +226,7 @@ class EpicAuthorization:
             for challenge_attempt in range(1, 4):
                 logger.debug("Solving login challenge attempt {}/3", challenge_attempt)
                 with suppress(Exception):
-                    await agent.wait_for_challenge()
+                    await asyncio.wait_for(agent.wait_for_challenge(), timeout=45)
                 try:
                     await self._await_login_outcome(point_url, timeout_seconds=25)
                     login_confirmed = True

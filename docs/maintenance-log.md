@@ -562,3 +562,12 @@
   - 将中英文文档进一步统一为：
     - `LLM_PROVIDER=glm` -> 填 `GLM_API_KEY`，无需新建并填写 `GEMINI_API_KEY`
     - `LLM_PROVIDER=gemini` -> 填 `GEMINI_API_KEY`，无需新建并填写 `GLM_API_KEY`
+
+## 2026-10-30
+
+### GitHub Actions 使用虚拟显示模式
+
+- 现象：定时任务在 Epic 登录 hCaptcha 阶段反复失败，登录页未跳转。
+- 根因判断：Actions 已通过 xvfb-run 提供虚拟显示，但部署入口固定使用 headless 模式，未利用 Camoufox 的 virtual 模式；验证码组件另有响应解析错误，不能确认本改动单独解决。
+- 改动文件：`app/deploy.py`、`docs/maintenance-log.md`。
+- 处理结果：Linux 部署入口使用 virtual 模式，其他系统保留原行为；等待下一次运行验证验证码通过率。

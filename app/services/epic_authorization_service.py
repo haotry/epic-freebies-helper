@@ -14,6 +14,7 @@ from contextlib import suppress
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 from hcaptcha_challenger.agent import AgentV
+from hcaptcha_challenger.models import CaptchaResponse
 from loguru import logger
 from playwright.async_api import expect, Page, Response
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
@@ -31,8 +32,48 @@ class EpicPreLoginSecurityError(RuntimeError):
     """Epic returned a bot/security interstitial instead of the login form."""
 
 
+def _patch_empty_checkcaptcha_response() -> None:
+    if getattr(AgentV._task_handler, "_epic_empty_response_patch", False):
+        return
+
+    original_handler = AgentV._task_handler
+
+    async def patched_handler(agent: AgentV, response: Response):
+        if "/checkcaptcha/" not in response.url:
+            return await original_handler(agent, response)
+        try:
+            body = await response.body()
+        except Exception:
+            return await original_handler(agent, response)
+
+        pending = getattr(agent, "_epic_empty_response_task", None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if body.strip():
+            return await original_handler(agent, response)
+
+        async def report_failure():
+            try:
+                await asyncio.sleep(5)
+                if agent._captcha_response_queue.empty():
+                    agent._captcha_response_queue.put_nowait(
+                        CaptchaResponse.model_validate(
+                            {"pass": False, "error": "empty_checkcaptcha_response"}
+                        )
+                    )
+            except asyncio.CancelledError:
+                pass
+
+        agent._epic_empty_response_task = asyncio.create_task(report_failure())
+        logger.warning("hCaptcha check returned an empty body; waiting for a paired response")
+
+    patched_handler._epic_empty_response_patch = True
+    AgentV._task_handler = patched_handler
+
+
 class EpicAuthorization:
     def __init__(self, page: Page):
+        _patch_empty_checkcaptcha_response()
         self.page = page
         self._is_login_success_signal = asyncio.Queue()
         self._login_error_signal = asyncio.Queue()

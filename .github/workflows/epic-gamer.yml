@@ -1,6 +1,8 @@
 name: Epic Awesome Gamer (Scheduled)
 
 on:
+  push:
+    branches: [master] # temporary verification; remove after this run
   workflow_dispatch: # 手动触发
   schedule:
     # 每周四 UTC 15:20 运行一次（北京时间周四 23:20）

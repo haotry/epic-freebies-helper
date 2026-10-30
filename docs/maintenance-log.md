@@ -571,3 +571,10 @@
 - 根因判断：Actions 已通过 xvfb-run 提供虚拟显示，但部署入口固定使用 headless 模式，未利用 Camoufox 的 virtual 模式；验证码组件另有响应解析错误，不能确认本改动单独解决。
 - 改动文件：`app/deploy.py`、`docs/maintenance-log.md`。
 - 处理结果：Linux 部署入口使用 virtual 模式，其他系统保留原行为；等待下一次运行验证验证码通过率。
+
+### 处理 hCaptcha 空验证响应
+
+- 现象：2026-10-30 手动运行出现 `checkcaptcha` 空响应解析错误，解题组件误报成功，Epic 登录页未跳转。
+- 根因判断：上游 `hcaptcha-challenger 0.19.0` 直接把空响应当 JSON 解析；在异步响应成对到达时还可能误判挑战结束。
+- 改动文件：`app/services/epic_authorization_service.py`、`.github/workflows/epic-gamer.yml`、`docs/maintenance-log.md`。
+- 处理结果：空响应先等待 5 秒，若无配对结果则明确入队失败；临时开启 master push 触发一次 Actions 验证，验证后移除。
